@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from wfp_compiler.ffmpeg_runtime import FFmpegNotFoundError, resolve_ffmpeg_binaries
-from wfp_compiler.models import QualityPreset
+from wfp_compiler.models import QualityPreset, RenderEngine
 from wfp_compiler.parser import parse_wfp_project
 from wfp_compiler.renderer import render_project_to_mp4
 
@@ -58,6 +58,7 @@ def test_integration_render_outputs_valid_mp4(tmp_path: Path) -> None:
         output_path=output,
         quality=QualityPreset.LOW,
         ffmpeg_binaries=binaries,
+        engine=RenderEngine.V1,
     )
 
     assert result.success, result.error

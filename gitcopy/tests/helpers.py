@@ -26,6 +26,10 @@ def create_minimal_wfp(
     audio_clip_stream_id: int = 0,
     resource_video_stream_count: int = 1,
     resource_audio_stream_count: int = 1,
+    extra_video_clip_fields: dict[str, object] | None = None,
+    extra_audio_clip_fields: dict[str, object] | None = None,
+    add_second_video_track: bool = False,
+    include_color_effect: bool = False,
 ) -> Path:
     timeline_media_id = "{11111111-1111-1111-1111-111111111111}"
     source_uuid = "source-uuid-1"
@@ -81,6 +85,18 @@ def create_minimal_wfp(
             ],
         },
     ]
+    if include_color_effect:
+        video_effects.append(
+            {
+                "display": "color",
+                "id": "video/effect/color/basic",
+                "type": 3,
+                "paramList": [
+                    {"name": "brightness", "fxParam": {"paramType": 5, "unValue": 0.1}},
+                    {"name": "contrast", "fxParam": {"paramType": 5, "unValue": 1.2}},
+                ],
+            }
+        )
 
     video_clip = {
         "thisUId": "video-clip-1",
@@ -137,6 +153,40 @@ def create_minimal_wfp(
         },
         "userData": [],
     }
+    if extra_video_clip_fields:
+        video_clip.update(extra_video_clip_fields)
+    if extra_audio_clip_fields:
+        audio_clip.update(extra_audio_clip_fields)
+
+    track_infos = [
+        {
+            "trackType": 2,
+            "trackTag": 1,
+            "uuid": "track-a-1",
+            "clipList": [audio_clip],
+        },
+        {
+            "trackType": 1,
+            "trackTag": 2,
+            "uuid": "track-v-1",
+            "clipList": [video_clip],
+        },
+    ]
+    if add_second_video_track:
+        second_clip = dict(video_clip)
+        second_clip["thisUId"] = "video-clip-2"
+        second_clip["tlBegin"] = max(0, duration_us // 4)
+        second_clip["tlEnd"] = max(second_clip["tlBegin"] + 1_000_000, duration_us - duration_us // 8)
+        second_clip["outPoint"] = min(duration_us, second_clip["tlEnd"] - second_clip["tlBegin"])
+        second_clip["inPoint"] = 0
+        track_infos.append(
+            {
+                "trackType": 1,
+                "trackTag": 2,
+                "uuid": "track-v-2",
+                "clipList": [second_clip],
+            }
+        )
 
     timeline = {
         "currentTimelineId": 1,
@@ -158,20 +208,7 @@ def create_minimal_wfp(
                 "resolutionHeight": height,
                 "sampleRate": 44100,
                 "frameRate": {"num": fps_num, "den": fps_den},
-                "trackInfos": [
-                    {
-                        "trackType": 2,
-                        "trackTag": 1,
-                        "uuid": "track-a-1",
-                        "clipList": [audio_clip],
-                    },
-                    {
-                        "trackType": 1,
-                        "trackTag": 2,
-                        "uuid": "track-v-1",
-                        "clipList": [video_clip],
-                    },
-                ],
+                "trackInfos": track_infos,
                 "type": 0,
                 "userData": [],
             }

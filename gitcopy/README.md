@@ -41,6 +41,20 @@ Disable audio repair if needed:
 python -m wfp_compiler render --input project.wfp --output output.mp4 --no-audio-repair
 ```
 
+Select engine explicitly (`v2` is default):
+
+```powershell
+python -m wfp_compiler render --input project.wfp --output output.mp4 --engine v2
+```
+
+Parity tooling:
+
+```powershell
+python -m wfp_compiler parity scan --manifest parity/manifest.example.json
+python -m wfp_compiler parity run --manifest parity/manifest.example.json
+python -m wfp_compiler parity effects --manifest parity/manifest.example.json
+```
+
 ## Build EXE
 
 ```powershell

@@ -1,0 +1,10 @@
+{
+  "cases": [
+    {
+      "name": "example-case",
+      "input_wfp": "C:/path/to/project.wfp",
+      "golden_output": "C:/path/to/golden.mp4",
+      "output_name": "example-case.mp4"
+    }
+  ]
+}

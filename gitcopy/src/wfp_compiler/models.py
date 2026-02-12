@@ -12,6 +12,11 @@ class QualityPreset(str, Enum):
     HIGH = "High"
 
 
+class RenderEngine(str, Enum):
+    V1 = "v1"
+    V2 = "v2"
+
+
 @dataclass(slots=True)
 class ProjectInfo:
     file_name: str
@@ -31,6 +36,18 @@ class ResourceInfo:
     path: Path
     video_stream_count: int
     audio_stream_count: int
+    raw_extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class KeyframePoint:
+    time_s: float
+    value: float
+
+
+@dataclass(slots=True)
+class KeyframeCurve:
+    points: tuple[KeyframePoint, ...] = field(default_factory=tuple)
 
 
 @dataclass(slots=True)
@@ -52,7 +69,11 @@ class Clip:
     effect_params: dict[str, dict[str, Any]] = field(default_factory=dict)
     speed_reverse: bool = False
     speed_non_trivial: bool = False
+    speed_keyframes: tuple[tuple[float, float], ...] = field(default_factory=tuple)
+    volume_keyframes: tuple[tuple[float, float], ...] = field(default_factory=tuple)
+    ducking_keyframes: tuple[tuple[float, float], ...] = field(default_factory=tuple)
     flags: tuple[str, ...] = field(default_factory=tuple)
+    raw_extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def duration_us(self) -> int:
@@ -66,6 +87,7 @@ class Track:
     track_tag: int | None
     uuid: str
     clips: list[Clip]
+    raw_extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -75,6 +97,7 @@ class ParsedProject:
     tracks: list[Track]
     resources_by_uuid: dict[str, ResourceInfo]
     parser_warnings: list[str] = field(default_factory=list)
+    raw_extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def video_tracks(self) -> list[Track]:
@@ -115,6 +138,58 @@ class RenderPlan:
     project: ParsedProject
     video_segments: list[VideoSegment]
     audio_segments: list[AudioSegment]
+    missing_media: list[Path]
+    warnings: list[str]
+
+
+@dataclass(slots=True)
+class LayeredClip:
+    clip: Clip
+    track_index: int
+    z_index: int
+
+
+@dataclass(slots=True)
+class Transition:
+    kind: str
+    duration_us: int
+    from_clip_uid: str | None = None
+    to_clip_uid: str | None = None
+    raw_params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ColorAdjustment:
+    effect_id: str
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TitleLayer:
+    tl_begin_us: int
+    tl_end_us: int
+    text: str
+    x: float | None = None
+    y: float | None = None
+    font_size: int | None = None
+    color: str | None = None
+    raw_params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TimelineV2:
+    project: ParsedProject
+    layered_video_clips: list[LayeredClip]
+    audio_clips: list[Clip]
+    transitions: list[Transition] = field(default_factory=list)
+    title_layers: list[TitleLayer] = field(default_factory=list)
+    color_adjustments_by_clip: dict[str, list[ColorAdjustment]] = field(default_factory=dict)
+    raw_extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class RenderPlanV2:
+    timeline: TimelineV2
     missing_media: list[Path]
     warnings: list[str]
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from wfp_compiler.ffmpeg_graph import FFmpegGraph
 from wfp_compiler.ffmpeg_runtime import FFmpegBinaries
-from wfp_compiler.models import QualityPreset
+from wfp_compiler.models import QualityPreset, RenderEngine
 from wfp_compiler.parser import parse_wfp_project
 from wfp_compiler import renderer
 
@@ -48,6 +48,7 @@ def test_encoder_fallback_retries_and_succeeds_on_cpu(tmp_path: Path, monkeypatc
         output_path=tmp_path / "out.mp4",
         quality=QualityPreset.BALANCED,
         ffmpeg_binaries=binaries,
+        engine=RenderEngine.V1,
     )
 
     assert result.success

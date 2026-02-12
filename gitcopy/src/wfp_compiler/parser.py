@@ -59,8 +59,8 @@ def parse_wfp_project(wfp_path: str | Path) -> ParsedProject:
 
         tracks: list[Track] = []
         for track_index, track_obj in enumerate(track_infos):
-            track_type = int(track_obj.get("trackType") or 0)
-            clip_list = track_obj.get("clipList")
+            track_type = int(_first(track_obj, "trackType", "type", default=0))
+            clip_list = _first(track_obj, "clipList", "clips", default=[])
             if not isinstance(clip_list, list):
                 clip_list = []
 
@@ -74,22 +74,34 @@ def parse_wfp_project(wfp_path: str | Path) -> ParsedProject:
                     continue
                 clips.append(clip)
 
+            track_known_keys = {"trackType", "type", "trackTag", "uuid", "clipList", "clips"}
             tracks.append(
                 Track(
                     index=track_index,
                     track_type=track_type,
-                    track_tag=_optional_int(track_obj.get("trackTag")),
-                    uuid=str(track_obj.get("uuid") or f"track-{track_index}"),
+                    track_tag=_optional_int(_first(track_obj, "trackTag", "tag", default=None)),
+                    uuid=str(_first(track_obj, "uuid", "id", default=f"track-{track_index}")),
                     clips=clips,
+                    raw_extra=_extract_raw_extra(track_obj, track_known_keys),
                 )
             )
 
+    parsed_known_keys = {
+        "timelineInfos",
+        "resources",
+        "currentTimelineId",
+        "productName",
+        "projectName",
+        "serialNumber",
+        "serializationVersion",
+    }
     return ParsedProject(
         wfp_path=wfp_path,
         info=project,
         tracks=tracks,
         resources_by_uuid=resources_by_uuid,
         parser_warnings=parser_warnings,
+        raw_extra=_extract_raw_extra(timeline_root, parsed_known_keys),
     )
 
 
@@ -123,16 +135,31 @@ def _parse_resources(resource_list: list[Any]) -> dict[str, ResourceInfo]:
         if not isinstance(resource, dict):
             continue
 
-        source_uuid = resource.get("sourceUuid")
-        filename = resource.get("filename")
+        source_uuid = _first(resource, "sourceUuid", "uuid", "id")
+        filename = _first(resource, "filename", "path", "filePath", "sourcePath")
         if not source_uuid or not filename:
             continue
 
+        known_keys = {
+            "sourceUuid",
+            "uuid",
+            "id",
+            "filename",
+            "path",
+            "filePath",
+            "sourcePath",
+            "videoStreamCount",
+            "audioStreamCount",
+            "videoCount",
+            "audioCount",
+            "streamType",
+        }
         resources[str(source_uuid)] = ResourceInfo(
             source_uuid=str(source_uuid),
             path=normalize_file_uri_to_path(str(filename)),
-            video_stream_count=int(resource.get("videoStreamCount") or 0),
-            audio_stream_count=int(resource.get("audioStreamCount") or 0),
+            video_stream_count=int(_first(resource, "videoStreamCount", "videoCount", default=0) or 0),
+            audio_stream_count=int(_first(resource, "audioStreamCount", "audioCount", default=0) or 0),
+            raw_extra=_extract_raw_extra(resource, known_keys),
         )
 
     return resources
@@ -142,8 +169,8 @@ def _parse_clip(clip_obj: Any, track_type: int) -> Clip | None:
     if not isinstance(clip_obj, dict):
         return None
 
-    source_uuid = str(clip_obj.get("sourceUuid") or "")
-    filename = str(clip_obj.get("filename") or "")
+    source_uuid = str(_first(clip_obj, "sourceUuid", "mediaUuid", "mediaId", default=""))
+    filename = str(_first(clip_obj, "filename", "path", "filePath", "sourcePath", default=""))
     if not filename:
         return None
 
@@ -153,19 +180,19 @@ def _parse_clip(clip_obj: Any, track_type: int) -> Clip | None:
     has_transform = False
     has_crop_pan_zoom = False
 
-    effect_chain_list = clip_obj.get("effectChainList")
+    effect_chain_list = _first(clip_obj, "effectChainList", "effectChains", default=[])
     if isinstance(effect_chain_list, list):
         for chain in effect_chain_list:
             if not isinstance(chain, dict):
                 continue
-            effect_list = chain.get("effectList")
+            effect_list = _first(chain, "effectList", "effects", default=[])
             if not isinstance(effect_list, list):
                 continue
 
             for effect in effect_list:
                 if not isinstance(effect, dict):
                     continue
-                effect_id = str(effect.get("id") or "")
+                effect_id = str(_first(effect, "id", "effectId", "name", default=""))
                 if not effect_id:
                     continue
                 effect_ids.append(effect_id)
@@ -183,34 +210,72 @@ def _parse_clip(clip_obj: Any, track_type: int) -> Clip | None:
                 if parsed_effect_params:
                     effect_params[effect_id] = parsed_effect_params
 
-    speed_reverse, speed_non_trivial = _parse_speed_flags(clip_obj.get("speed"))
+    speed_reverse, speed_non_trivial, speed_keyframes = _parse_speed_flags(_first(clip_obj, "speed", default=None))
+
+    volume_kf = _parse_keyframe_field(_first(clip_obj, "volumeKeyframe", default=None))
+    ducking_kf = _parse_keyframe_field(_first(clip_obj, "audioDuckingframe", "audioDuckingKeyframe", default=None))
 
     flags: list[str] = []
-    if _has_non_empty_keyframe_param(clip_obj.get("volumeKeyframe")):
+    if volume_kf:
         flags.append("volume_keyframes")
-    if _has_non_empty_keyframe_param(clip_obj.get("audioDuckingframe")):
+    if ducking_kf:
         flags.append("audio_ducking_keyframes")
 
-    user_data = clip_obj.get("userData")
+    user_data = _first(clip_obj, "userData", "userdata", default=[])
     if isinstance(user_data, list):
         if _has_enabled_ai_user_data(user_data):
             flags.append("ai_user_data")
 
-    stabilization = clip_obj.get("stabilization")
+    stabilization = _first(clip_obj, "stabilization", default=None)
     if isinstance(stabilization, dict) and int(stabilization.get("status") or 0) != 0:
         flags.append("stabilization")
 
+    known_keys = {
+        "thisUId",
+        "thisUid",
+        "uuid",
+        "id",
+        "sourceUuid",
+        "mediaUuid",
+        "mediaId",
+        "filename",
+        "path",
+        "filePath",
+        "sourcePath",
+        "type",
+        "clipType",
+        "streamId",
+        "audioStreamIndex",
+        "tlBegin",
+        "timelineStart",
+        "tlEnd",
+        "timelineEnd",
+        "inPoint",
+        "sourceIn",
+        "outPoint",
+        "sourceOut",
+        "speed",
+        "effectChainList",
+        "effectChains",
+        "volumeKeyframe",
+        "audioDuckingframe",
+        "audioDuckingKeyframe",
+        "userData",
+        "userdata",
+        "stabilization",
+    }
+
     return Clip(
-        this_uid=str(clip_obj.get("thisUId") or ""),
+        this_uid=str(_first(clip_obj, "thisUId", "thisUid", "uuid", "id", default="")),
         source_uuid=source_uuid,
         source_path=normalize_file_uri_to_path(filename),
         track_type=track_type,
-        clip_type=int(clip_obj.get("type") or 0),
-        stream_id=int(clip_obj.get("streamId") or 0),
-        tl_begin_us=int(clip_obj.get("tlBegin") or 0),
-        tl_end_us=int(clip_obj.get("tlEnd") or 0),
-        in_point_us=int(clip_obj.get("inPoint") or 0),
-        out_point_us=int(clip_obj.get("outPoint") or 0),
+        clip_type=int(_first(clip_obj, "type", "clipType", default=0) or 0),
+        stream_id=int(_first(clip_obj, "streamId", "audioStreamIndex", default=0) or 0),
+        tl_begin_us=int(_first(clip_obj, "tlBegin", "timelineStart", default=0) or 0),
+        tl_end_us=int(_first(clip_obj, "tlEnd", "timelineEnd", default=0) or 0),
+        in_point_us=int(_first(clip_obj, "inPoint", "sourceIn", default=0) or 0),
+        out_point_us=int(_first(clip_obj, "outPoint", "sourceOut", default=0) or 0),
         volume_gain_db=volume_gain_db,
         has_transform=has_transform,
         has_crop_pan_zoom=has_crop_pan_zoom,
@@ -218,24 +283,30 @@ def _parse_clip(clip_obj: Any, track_type: int) -> Clip | None:
         effect_params=effect_params,
         speed_reverse=speed_reverse,
         speed_non_trivial=speed_non_trivial,
+        speed_keyframes=tuple(speed_keyframes),
+        volume_keyframes=tuple(volume_kf),
+        ducking_keyframes=tuple(ducking_kf),
         flags=tuple(sorted(set(flags))),
+        raw_extra=_extract_raw_extra(clip_obj, known_keys),
     )
 
 
 def _parse_volume_gain(effect_obj: dict[str, Any]) -> float | None:
-    param_list = effect_obj.get("paramList")
+    param_list = _first(effect_obj, "paramList", "params", default=[])
     if not isinstance(param_list, list):
         return None
 
     for param in param_list:
         if not isinstance(param, dict):
             continue
-        if str(param.get("name")) != "VolumeGain":
+        name = str(_first(param, "name", "paramName", default=""))
+        if name not in {"VolumeGain", "volumeGain", "gain"}:
             continue
-        fx_param = param.get("fxParam")
-        if not isinstance(fx_param, dict):
-            continue
-        value = fx_param.get("unValue")
+        fx_param = _first(param, "fxParam", "value", default=None)
+        if isinstance(fx_param, dict):
+            value = _first(fx_param, "unValue", "value", default=None)
+        else:
+            value = fx_param
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -244,7 +315,7 @@ def _parse_volume_gain(effect_obj: dict[str, Any]) -> float | None:
 
 
 def _parse_effect_params(effect_obj: dict[str, Any]) -> dict[str, Any]:
-    param_list = effect_obj.get("paramList")
+    param_list = _first(effect_obj, "paramList", "params", default=[])
     if not isinstance(param_list, list):
         return {}
 
@@ -252,27 +323,30 @@ def _parse_effect_params(effect_obj: dict[str, Any]) -> dict[str, Any]:
     for param in param_list:
         if not isinstance(param, dict):
             continue
-        name = str(param.get("name") or "")
+        name = str(_first(param, "name", "paramName", default=""))
         if not name:
             continue
-        fx_param = param.get("fxParam")
-        if not isinstance(fx_param, dict):
-            continue
-        if "unValue" in fx_param:
-            result[name] = fx_param.get("unValue")
+        fx_param = _first(param, "fxParam", "value", default=None)
+        if isinstance(fx_param, dict):
+            value = _first(fx_param, "unValue", "value", default=None)
+        else:
+            value = fx_param
+        if value is not None:
+            result[name] = value
 
     return result
 
 
-def _parse_speed_flags(speed_obj: Any) -> tuple[bool, bool]:
+def _parse_speed_flags(speed_obj: Any) -> tuple[bool, bool, list[tuple[float, float]]]:
     if not isinstance(speed_obj, dict):
-        return False, False
+        return False, False, []
 
     reverse = bool(speed_obj.get("reverse"))
     non_trivial = reverse
 
     speed_param = speed_obj.get("speedParam")
     parsed_param: dict[str, Any] | None = None
+    points: list[tuple[float, float]] = []
 
     if isinstance(speed_param, dict):
         parsed_param = speed_param
@@ -285,33 +359,58 @@ def _parse_speed_flags(speed_obj: Any) -> tuple[bool, bool]:
     if isinstance(parsed_param, dict):
         keyframes = parsed_param.get("keyframeSets")
         if isinstance(keyframes, list) and keyframes:
-            values: list[float] = []
             for frame in keyframes:
                 if not isinstance(frame, dict):
                     continue
-                value = frame.get("_value")
                 try:
-                    values.append(float(value))
+                    time_s = float(frame.get("_time"))
+                    value = float(frame.get("_value"))
                 except (TypeError, ValueError):
                     non_trivial = True
-            if any(abs(value - 1.0) > 1e-6 for value in values):
+                    continue
+                points.append((time_s, value))
+                if abs(value - 1.0) > 1e-6:
+                    non_trivial = True
+            points.sort(key=lambda item: item[0])
+            if len(points) > 2:
                 non_trivial = True
 
-    return reverse, non_trivial
+    return reverse, non_trivial, points
 
 
-def _has_non_empty_keyframe_param(field_obj: Any) -> bool:
+def _parse_keyframe_field(field_obj: Any) -> list[tuple[float, float]]:
     if not isinstance(field_obj, dict):
-        return False
+        return []
+
     parameter = field_obj.get("parameter")
-    if not isinstance(parameter, str) or not parameter.strip():
-        return False
-    try:
-        parsed = json.loads(parameter)
-    except json.JSONDecodeError:
-        return True
+    if isinstance(parameter, dict):
+        parsed = parameter
+    elif isinstance(parameter, str) and parameter.strip():
+        try:
+            parsed = json.loads(parameter)
+        except json.JSONDecodeError:
+            return []
+    else:
+        return []
+
+    if not isinstance(parsed, dict):
+        return []
     keyframes = parsed.get("keyframeSets")
-    return isinstance(keyframes, list) and len(keyframes) > 0
+    if not isinstance(keyframes, list):
+        return []
+
+    result: list[tuple[float, float]] = []
+    for frame in keyframes:
+        if not isinstance(frame, dict):
+            continue
+        try:
+            time_s = float(frame.get("_time"))
+            value = float(frame.get("_value"))
+        except (TypeError, ValueError):
+            continue
+        result.append((time_s, value))
+    result.sort(key=lambda item: item[0])
+    return result
 
 
 def _optional_int(value: Any) -> int | None:
@@ -321,6 +420,19 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _first(obj: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        if key in obj and obj[key] is not None:
+            return obj[key]
+    return default
+
+
+def _extract_raw_extra(obj: Any, known_keys: set[str]) -> dict[str, Any]:
+    if not isinstance(obj, dict):
+        return {}
+    return {str(key): value for key, value in obj.items() if str(key) not in known_keys}
 
 
 def _has_enabled_ai_user_data(user_data_list: list[Any]) -> bool:

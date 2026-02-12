@@ -52,7 +52,7 @@ def resolve_ffmpeg_binaries(
 def list_available_video_encoders(binaries: FFmpegBinaries) -> set[str]:
     binaries.ensure_exists()
     command = [str(binaries.ffmpeg_path), "-hide_banner", "-encoders"]
-    proc = subprocess.run(command, capture_output=True, text=True, check=False)
+    proc = subprocess.run(command, capture_output=True, text=True, check=False, **_windows_subprocess_kwargs())
     output = proc.stdout + "\n" + proc.stderr
     encoders: set[str] = set()
 
@@ -133,3 +133,9 @@ def _find_common_windows_locations() -> FFmpegBinaries | None:
             return FFmpegBinaries(ffmpeg, ffprobe)
 
     return None
+
+
+def _windows_subprocess_kwargs() -> dict[str, int]:
+    if sys.platform != "win32":
+        return {}
+    return {"creationflags": subprocess.CREATE_NO_WINDOW}

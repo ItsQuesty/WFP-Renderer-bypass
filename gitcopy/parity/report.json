@@ -1,0 +1,14 @@
+{
+  "generated_at": null,
+  "manifest_count": 0,
+  "pass_count": 0,
+  "pass_rate": 0.0,
+  "suite_pass": false,
+  "thresholds": {
+    "duration_delta_seconds_max": 0.1,
+    "ssim_min": 0.97,
+    "psnr_min": 40.0,
+    "audio_mean_volume_delta_db_max": 2.0
+  },
+  "cases": []
+}

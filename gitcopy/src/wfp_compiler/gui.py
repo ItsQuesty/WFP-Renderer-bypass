@@ -3,13 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 import json
 import os
+import subprocess
 import threading
+import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .ffmpeg_runtime import FFmpegNotFoundError, resolve_ffmpeg_binaries
-from .models import ParsedProject, QualityPreset
+from .models import ParsedProject, QualityPreset, RenderEngine, RenderResult
 from .parser import WfpParseError, parse_wfp_project
 from .relink import auto_match_missing_files, find_missing_media, normalize_path_key, resolve_path
 from .renderer import normalize_output_path, render_project_to_mp4
@@ -27,16 +29,25 @@ class WfpCompilerApp(tk.Tk):
         self.export_thread: threading.Thread | None = None
         self.cancel_event = threading.Event()
         self._clock_job: str | None = None
+        self._preview_thread: threading.Thread | None = None
+        self._preview_stop_event = threading.Event()
+        self._preview_photo: tk.PhotoImage | None = None
+        self._preview_output_path: Path | None = None
+        self._preview_ffmpeg_path: Path | None = None
 
         self.project_path_var = tk.StringVar(value="")
         self.output_path_var = tk.StringVar(value="")
         self.quality_var = tk.StringVar(value=QualityPreset.BALANCED.value)
+        self.engine_var = tk.StringVar(value=RenderEngine.V2.value)
+        self.theme_mode_var = tk.StringVar(value="Light")
         self.audio_repair_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Ready. Open a .wfp project to begin.")
         self.clock_var = tk.StringVar(value="--:--:--")
         self.runtime_stats_var = tk.StringVar(value="Idle")
         self.project_meta_var = tk.StringVar(value="No project loaded.")
+        self.render_view_status_var = tk.StringVar(value="No active render.")
 
+        self._load_ui_preferences()
         self._apply_professional_theme()
         self._build_ui()
         if not self._ensure_risk_acknowledged():
@@ -45,20 +56,11 @@ class WfpCompilerApp(tk.Tk):
         self._tick_clock()
 
     def _apply_professional_theme(self) -> None:
-        self.colors = {
-            "bg": "#F4F6FA",
-            "surface": "#FFFFFF",
-            "surface_alt": "#F8FAFD",
-            "border": "#D9DFEA",
-            "text": "#1F2937",
-            "muted": "#6B7280",
-            "accent": "#2563EB",
-            "accent_hover": "#1D4ED8",
-            "focus": "#60A5FA",
-            "warning": "#B45309",
-            "danger": "#B42318",
-            "text_on_accent": "#FFFFFF",
-        }
+        mode = self.theme_mode_var.get().strip().title()
+        if mode not in {"Light", "Dark"}:
+            mode = "Light"
+            self.theme_mode_var.set(mode)
+        self.colors = self._theme_palette(mode)
         self.fonts = {
             "main": ("Segoe UI", 10),
             "main_bold": ("Segoe UI Semibold", 10),
@@ -223,7 +225,7 @@ class WfpCompilerApp(tk.Tk):
         )
         style.map(
             "Treeview",
-            background=[("selected", "#DDEAFE")],
+            background=[("selected", self.colors["selected"])],
             foreground=[("selected", self.colors["text"])],
         )
         style.configure(
@@ -234,7 +236,7 @@ class WfpCompilerApp(tk.Tk):
             relief="flat",
             font=self.fonts["main_bold"],
         )
-        style.map("Treeview.Heading", background=[("active", "#EEF3FF")])
+        style.map("Treeview.Heading", background=[("active", self.colors["surface_hover"])])
 
         style.configure(
             "TProgressbar",
@@ -254,8 +256,127 @@ class WfpCompilerApp(tk.Tk):
 
         self.option_add("*TCombobox*Listbox.background", self.colors["surface"])
         self.option_add("*TCombobox*Listbox.foreground", self.colors["text"])
-        self.option_add("*TCombobox*Listbox.selectBackground", "#DDEAFE")
+        self.option_add("*TCombobox*Listbox.selectBackground", self.colors["selected"])
         self.option_add("*TCombobox*Listbox.selectForeground", self.colors["text"])
+        self._apply_text_widget_theme()
+
+    def _theme_palette(self, mode: str) -> dict[str, str]:
+        if mode == "Dark":
+            return {
+                "bg": "#12161F",
+                "surface": "#1B2230",
+                "surface_alt": "#161D2A",
+                "surface_hover": "#222C3D",
+                "border": "#2D3A52",
+                "text": "#E5EAF3",
+                "muted": "#AAB6C8",
+                "accent": "#3B82F6",
+                "accent_hover": "#2563EB",
+                "focus": "#60A5FA",
+                "warning": "#F59E0B",
+                "danger": "#EF4444",
+                "selected": "#2B3C5A",
+                "text_on_accent": "#FFFFFF",
+            }
+        return {
+            "bg": "#F4F6FA",
+            "surface": "#FFFFFF",
+            "surface_alt": "#F8FAFD",
+            "surface_hover": "#EEF3FF",
+            "border": "#D9DFEA",
+            "text": "#1F2937",
+            "muted": "#6B7280",
+            "accent": "#2563EB",
+            "accent_hover": "#1D4ED8",
+            "focus": "#60A5FA",
+            "warning": "#B45309",
+            "danger": "#B42318",
+            "selected": "#DDEAFE",
+            "text_on_accent": "#FFFFFF",
+        }
+
+    def _apply_text_widget_theme(self) -> None:
+        if hasattr(self, "warning_text"):
+            self.warning_text.configure(
+                bg=self.colors["surface"],
+                fg=self.colors["text"],
+                insertbackground=self.colors["text"],
+                selectbackground=self.colors["selected"],
+                selectforeground=self.colors["text"],
+            )
+        if hasattr(self, "log_text"):
+            self.log_text.configure(
+                bg=self.colors["surface"],
+                fg=self.colors["text"],
+                insertbackground=self.colors["text"],
+                selectbackground=self.colors["selected"],
+                selectforeground=self.colors["text"],
+            )
+
+    def _settings_dir(self) -> Path:
+        appdata = Path(os.getenv("APPDATA", str(Path.home())))
+        settings_dir = appdata / "wfp-compiler"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        return settings_dir
+
+    def _ui_settings_path(self) -> Path:
+        return self._settings_dir() / "ui_settings.json"
+
+    def _load_ui_preferences(self) -> None:
+        path = self._ui_settings_path()
+        if not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+
+        theme = str(payload.get("theme") or "").title()
+        if theme in {"Light", "Dark"}:
+            self.theme_mode_var.set(theme)
+
+        engine = str(payload.get("engine") or "").lower()
+        if engine in {item.value for item in RenderEngine}:
+            self.engine_var.set(engine)
+
+        quality = str(payload.get("quality") or "")
+        if quality in {item.value for item in QualityPreset}:
+            self.quality_var.set(quality)
+
+        if "audio_repair" in payload:
+            self.audio_repair_var.set(bool(payload.get("audio_repair")))
+
+        geometry = str(payload.get("geometry") or "")
+        if geometry:
+            try:
+                self.geometry(geometry)
+            except tk.TclError:
+                pass
+
+    def _save_ui_preferences(self) -> None:
+        payload = {
+            "theme": self.theme_mode_var.get(),
+            "engine": self.engine_var.get(),
+            "quality": self.quality_var.get(),
+            "audio_repair": bool(self.audio_repair_var.get()),
+            "geometry": self.winfo_geometry(),
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            self._ui_settings_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _on_theme_change(self, _event: object | None = None) -> None:
+        self._apply_professional_theme()
+        self._save_ui_preferences()
+        self.status_var.set(f"Theme switched to {self.theme_mode_var.get()}.")
+
+    def _on_engine_change(self, _event: object | None = None) -> None:
+        self._save_ui_preferences()
+        if self.parsed_project:
+            self._refresh_warnings()
+            self._refresh_feature_check()
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, style="Root.TFrame", padding=(14, 14, 14, 10))
@@ -310,16 +431,42 @@ class WfpCompilerApp(tk.Tk):
             width=16,
         )
         quality_combo.grid(row=0, column=0, sticky="w")
-        quality_combo.current(1)
+        quality_values = [preset.value for preset in QualityPreset]
+        quality_combo.current(quality_values.index(self.quality_var.get()) if self.quality_var.get() in quality_values else 1)
+        quality_combo.bind("<<ComboboxSelected>>", lambda _event: self._save_ui_preferences())
+        ttk.Label(quality_row, text="Engine", style="Section.TLabel").grid(row=0, column=1, sticky="w", padx=(14, 6))
+        engine_combo = ttk.Combobox(
+            quality_row,
+            textvariable=self.engine_var,
+            values=[engine.value for engine in RenderEngine],
+            state="readonly",
+            width=8,
+        )
+        engine_combo.grid(row=0, column=2, sticky="w")
+        engine_values = [engine.value for engine in RenderEngine]
+        engine_combo.current(engine_values.index(self.engine_var.get()) if self.engine_var.get() in engine_values else 1)
+        engine_combo.bind("<<ComboboxSelected>>", self._on_engine_change)
+        ttk.Label(quality_row, text="Theme", style="Section.TLabel").grid(row=0, column=3, sticky="w", padx=(14, 6))
+        self.theme_combo = ttk.Combobox(
+            quality_row,
+            textvariable=self.theme_mode_var,
+            values=["Light", "Dark"],
+            state="readonly",
+            width=8,
+        )
+        self.theme_combo.grid(row=0, column=4, sticky="w")
+        self.theme_combo.current(0 if self.theme_mode_var.get() == "Light" else 1)
+        self.theme_combo.bind("<<ComboboxSelected>>", self._on_theme_change)
         ttk.Checkbutton(
             quality_row,
             text="Audio Repair (Recommended)",
             variable=self.audio_repair_var,
-        ).grid(row=0, column=1, sticky="w", padx=(14, 0))
+            command=self._save_ui_preferences,
+        ).grid(row=0, column=5, sticky="w", padx=(14, 0))
 
         action_row = ttk.Frame(settings, style="Root.TFrame")
         action_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(12, 0))
-        action_row.columnconfigure(2, weight=1)
+        action_row.columnconfigure(3, weight=1)
 
         self.export_button = ttk.Button(action_row, text="Export", command=self.start_export, style="Primary.TButton")
         self.export_button.grid(row=0, column=0, sticky="w")
@@ -333,8 +480,16 @@ class WfpCompilerApp(tk.Tk):
         )
         self.cancel_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
 
+        self.open_output_button = ttk.Button(
+            action_row,
+            text="Open Output Folder",
+            command=self.open_output_folder,
+            style="Secondary.TButton",
+        )
+        self.open_output_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+
         self.progress = ttk.Progressbar(action_row, mode="indeterminate")
-        self.progress.grid(row=0, column=2, sticky="ew", padx=(12, 0))
+        self.progress.grid(row=0, column=3, sticky="ew", padx=(12, 0))
 
         body = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
         body.grid(row=2, column=0, sticky="nsew")
@@ -398,7 +553,7 @@ class WfpCompilerApp(tk.Tk):
             bg=self.colors["surface"],
             fg=self.colors["text"],
             insertbackground=self.colors["text"],
-            selectbackground="#DDEAFE",
+            selectbackground=self.colors["selected"],
             selectforeground=self.colors["text"],
             relief="solid",
             borderwidth=1,
@@ -410,6 +565,45 @@ class WfpCompilerApp(tk.Tk):
         warning_scroll = ttk.Scrollbar(warning_frame, orient="vertical", command=self.warning_text.yview)
         warning_scroll.grid(row=0, column=1, sticky="ns")
         self.warning_text.configure(yscrollcommand=warning_scroll.set, state="disabled")
+
+        feature_tab = ttk.Frame(tabs, style="Root.TFrame")
+        feature_tab.columnconfigure(0, weight=1)
+        feature_tab.rowconfigure(0, weight=1)
+        tabs.add(feature_tab, text="Feature Check")
+
+        feature_frame = ttk.LabelFrame(
+            feature_tab,
+            text="Feature Support Matrix",
+            style="Card.TLabelframe",
+            padding=(10, 10, 10, 10),
+        )
+        feature_frame.grid(row=0, column=0, sticky="nsew")
+        feature_frame.columnconfigure(0, weight=1)
+        feature_frame.rowconfigure(0, weight=1)
+
+        feature_columns = ("feature", "status", "details")
+        self.feature_tree = ttk.Treeview(feature_frame, columns=feature_columns, show="headings")
+        self.feature_tree.heading("feature", text="Feature")
+        self.feature_tree.heading("status", text="Status")
+        self.feature_tree.heading("details", text="Details")
+        self.feature_tree.column("feature", width=280, anchor="w")
+        self.feature_tree.column("status", width=120, anchor="center")
+        self.feature_tree.column("details", width=820, anchor="w")
+        self.feature_tree.grid(row=0, column=0, sticky="nsew")
+
+        feature_scroll = ttk.Scrollbar(feature_frame, orient="vertical", command=self.feature_tree.yview)
+        feature_scroll.grid(row=0, column=1, sticky="ns")
+        self.feature_tree.configure(yscrollcommand=feature_scroll.set)
+
+        feature_actions = ttk.Frame(feature_frame, style="Root.TFrame")
+        feature_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(
+            feature_actions,
+            text="Refresh Feature Check",
+            command=self._refresh_feature_check,
+            style="Secondary.TButton",
+        ).pack(side=tk.LEFT)
+
         relink_tab = ttk.Frame(tabs, style="Root.TFrame")
         relink_tab.columnconfigure(0, weight=1)
         relink_tab.rowconfigure(0, weight=1)
@@ -467,7 +661,7 @@ class WfpCompilerApp(tk.Tk):
             bg=self.colors["surface"],
             fg=self.colors["text"],
             insertbackground=self.colors["text"],
-            selectbackground="#DDEAFE",
+            selectbackground=self.colors["selected"],
             selectforeground=self.colors["text"],
             relief="solid",
             borderwidth=1,
@@ -480,10 +674,50 @@ class WfpCompilerApp(tk.Tk):
         log_scroll.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=log_scroll.set, state="disabled")
 
+        log_actions = ttk.Frame(log_frame, style="Root.TFrame")
+        log_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(log_actions, text="Copy Log", command=self.copy_log_to_clipboard, style="Secondary.TButton").pack(
+            side=tk.LEFT
+        )
+        ttk.Button(log_actions, text="Clear Log", command=self._clear_log, style="Secondary.TButton").pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+
+        render_view_tab = ttk.Frame(tabs, style="Root.TFrame")
+        render_view_tab.columnconfigure(0, weight=1)
+        render_view_tab.rowconfigure(1, weight=1)
+        tabs.add(render_view_tab, text="Render View")
+
+        ttk.Label(
+            render_view_tab,
+            textvariable=self.render_view_status_var,
+            style="Section.TLabel",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        preview_frame = ttk.LabelFrame(
+            render_view_tab,
+            text="Live Preview",
+            style="Card.TLabelframe",
+            padding=(10, 10, 10, 10),
+        )
+        preview_frame.grid(row=1, column=0, sticky="nsew")
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
+
+        self.render_preview_label = ttk.Label(
+            preview_frame,
+            text="Preview will appear while rendering...",
+            style="MutedData.TLabel",
+            anchor="center",
+            justify="center",
+        )
+        self.render_preview_label.grid(row=0, column=0, sticky="nsew")
+
         status_bar = ttk.Frame(root, style="Card.TFrame", padding=(10, 7))
         status_bar.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         status_bar.columnconfigure(0, weight=1)
         ttk.Label(status_bar, textvariable=self.status_var, style="Status.TLabel").grid(row=0, column=0, sticky="w")
+        self._refresh_feature_check()
 
     def _tick_clock(self) -> None:
         self.clock_var.set(datetime.now().strftime("%H:%M:%S"))
@@ -491,7 +725,13 @@ class WfpCompilerApp(tk.Tk):
         export_state = "Running" if self.export_thread and self.export_thread.is_alive() else "Idle"
         thread_count = threading.active_count()
         self.runtime_stats_var.set(
-            f"Export: {export_state}\nThreads: {thread_count}\nAudio Repair: {'On' if self.audio_repair_var.get() else 'Off'}"
+            "Export: {export}\nThreads: {threads}\nEngine: {engine}\nTheme: {theme}\nAudio Repair: {audio}".format(
+                export=export_state,
+                threads=thread_count,
+                engine=self.engine_var.get(),
+                theme=self.theme_mode_var.get(),
+                audio="On" if self.audio_repair_var.get() else "Off",
+            )
         )
         self._clock_job = self.after(1000, self._tick_clock)
 
@@ -502,13 +742,12 @@ class WfpCompilerApp(tk.Tk):
             except tk.TclError:
                 pass
             self._clock_job = None
+        self._stop_render_preview()
+        self._save_ui_preferences()
         super().destroy()
 
     def _risk_ack_path(self) -> Path:
-        appdata = Path(os.getenv("APPDATA", str(Path.home())))
-        settings_dir = appdata / "wfp-compiler"
-        settings_dir.mkdir(parents=True, exist_ok=True)
-        return settings_dir / "risk_ack.json"
+        return self._settings_dir() / "risk_ack.json"
 
     def _has_risk_ack(self) -> bool:
         if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("WFP_COMPILER_SKIP_RISK_ACK") == "1":
@@ -630,8 +869,10 @@ class WfpCompilerApp(tk.Tk):
         default_output = self._default_output_for_project(project.wfp_path)
         self.output_path_var.set(str(default_output))
         self._refresh_warnings()
+        self._refresh_feature_check()
         self._refresh_media_tree()
         self._refresh_project_meta()
+        self.render_view_status_var.set("Project loaded. Preview will appear during export.")
         self.status_var.set(f"Loaded project: {project.info.file_name}")
 
     def _refresh_project_meta(self) -> None:
@@ -674,6 +915,27 @@ class WfpCompilerApp(tk.Tk):
         )
         if chosen:
             self.output_path_var.set(chosen)
+            self._save_ui_preferences()
+
+    def open_output_folder(self) -> None:
+        target_text = self.output_path_var.get().strip()
+        if not target_text:
+            messagebox.showinfo("Output Folder", "Choose an output path first.", parent=self)
+            return
+
+        target = normalize_output_path(target_text)
+        folder = target.parent
+        if not folder.exists():
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                messagebox.showerror("Output Folder", f"Failed to create folder:\n{exc}", parent=self)
+                return
+
+        try:
+            os.startfile(str(folder))
+        except OSError as exc:
+            messagebox.showerror("Output Folder", f"Failed to open folder:\n{exc}", parent=self)
 
     def _refresh_warnings(self) -> None:
         self.warning_text.configure(state="normal")
@@ -686,7 +948,7 @@ class WfpCompilerApp(tk.Tk):
 
         from .feature_check import analyze_project_features
 
-        warnings = analyze_project_features(self.parsed_project)
+        warnings = analyze_project_features(self.parsed_project, engine=self.engine_var.get())
         if warnings:
             for warning in warnings:
                 self.warning_text.insert(tk.END, f"- {warning}\n")
@@ -694,6 +956,22 @@ class WfpCompilerApp(tk.Tk):
             self.warning_text.insert(tk.END, "No compatibility warnings detected.")
 
         self.warning_text.configure(state="disabled")
+
+    def _refresh_feature_check(self) -> None:
+        if not hasattr(self, "feature_tree"):
+            return
+        for item in self.feature_tree.get_children():
+            self.feature_tree.delete(item)
+
+        if not self.parsed_project:
+            self.feature_tree.insert("", tk.END, values=("Project", "N/A", "Load a project to see feature support."))
+            return
+
+        from .feature_check import build_feature_check_rows
+
+        rows = build_feature_check_rows(self.parsed_project, engine=self.engine_var.get())
+        for feature, status, details in rows:
+            self.feature_tree.insert("", tk.END, values=(feature, status, details))
 
     def _refresh_media_tree(self) -> None:
         for item in self.media_tree.get_children():
@@ -810,37 +1088,63 @@ class WfpCompilerApp(tk.Tk):
         self._set_busy(True)
         self._clear_log()
         self.status_var.set("Exporting...")
+        self._start_render_preview(output_path, binaries.ffmpeg_path)
 
         quality = self.quality_var.get()
+        engine = self.engine_var.get()
         audio_repair = bool(self.audio_repair_var.get())
+        self._save_ui_preferences()
         self.export_thread = threading.Thread(
             target=self._run_export_worker,
-            args=(output_path, quality, audio_repair, binaries),
+            args=(output_path, quality, engine, audio_repair, binaries),
             daemon=True,
         )
         self.export_thread.start()
 
-    def _run_export_worker(self, output_path: Path, quality: str, audio_repair: bool, binaries) -> None:
+    def _run_export_worker(self, output_path: Path, quality: str, engine: str, audio_repair: bool, binaries) -> None:
         def _log(line: str) -> None:
             self.after(0, self._append_log, line)
 
-        result = render_project_to_mp4(
-            project=self.parsed_project,
-            output_path=output_path,
-            quality=quality,
-            ffmpeg_binaries=binaries,
-            relink_map=self.relink_map,
-            audio_repair=audio_repair,
-            log_callback=_log,
-            cancel_event=self.cancel_event,
-        )
+        try:
+            result = render_project_to_mp4(
+                project=self.parsed_project,
+                output_path=output_path,
+                quality=quality,
+                ffmpeg_binaries=binaries,
+                relink_map=self.relink_map,
+                audio_repair=audio_repair,
+                log_callback=_log,
+                cancel_event=self.cancel_event,
+                engine=engine,
+            )
+        except Exception as exc:
+            tb_text = traceback.format_exc()
+            self.after(0, self._append_log, "[FATAL] Unexpected export worker error:")
+            for line in tb_text.rstrip().splitlines():
+                self.after(0, self._append_log, line)
+            result = RenderResult(
+                success=False,
+                output_path=output_path,
+                encoder=None,
+                warnings=[],
+                error=f"Unexpected export worker error: {exc}",
+            )
         self.after(0, self._on_export_complete, result)
 
     def _on_export_complete(self, result) -> None:
         self._set_busy(False)
+        preview_ffmpeg = self._preview_ffmpeg_path
+        self._stop_render_preview()
 
         if result.success:
             self.status_var.set("Export completed.")
+            final_preview_ok = False
+            if preview_ffmpeg is not None:
+                final_preview_ok = self._capture_final_preview(Path(result.output_path), preview_ffmpeg)
+            if final_preview_ok:
+                self.render_view_status_var.set("Render completed. Final preview frame shown.")
+            else:
+                self.render_view_status_var.set("Render completed. Preview unavailable for this output.")
             messagebox.showinfo(
                 "Export Complete",
                 f"Output: {result.output_path}\nEncoder: {result.encoder}",
@@ -848,6 +1152,7 @@ class WfpCompilerApp(tk.Tk):
             )
         else:
             self.status_var.set("Export failed.")
+            self.render_view_status_var.set(f"Render failed: {result.error or 'Unknown error'}")
             messagebox.showerror("Export Failed", result.error or "Unknown error", parent=self)
 
         if result.warnings:
@@ -856,17 +1161,23 @@ class WfpCompilerApp(tk.Tk):
             for warning in result.warnings:
                 self.warning_text.insert(tk.END, f"- {warning}\n")
             self.warning_text.configure(state="disabled")
+            self._refresh_feature_check()
 
     def cancel_export(self) -> None:
         if self.export_thread and self.export_thread.is_alive():
             self.cancel_event.set()
             self.status_var.set("Canceling export...")
             self._append_log("Cancel requested.")
+            self.render_view_status_var.set("Cancel requested. Waiting for ffmpeg to stop...")
 
     def _set_busy(self, busy: bool) -> None:
         self.export_button.configure(state="disabled" if busy else "normal")
         self.cancel_button.configure(state="normal" if busy else "disabled")
         self.open_project_button.configure(state="disabled" if busy else "normal")
+        if hasattr(self, "open_output_button"):
+            self.open_output_button.configure(state="disabled" if busy else "normal")
+        if hasattr(self, "theme_combo"):
+            self.theme_combo.configure(state="disabled" if busy else "readonly")
         if busy:
             self.progress.start(10)
         else:
@@ -882,6 +1193,149 @@ class WfpCompilerApp(tk.Tk):
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", tk.END)
         self.log_text.configure(state="disabled")
+
+    def _start_render_preview(self, output_path: Path, ffmpeg_path: Path) -> None:
+        self._stop_render_preview()
+        self._preview_output_path = output_path
+        self._preview_ffmpeg_path = ffmpeg_path
+        self._preview_stop_event.clear()
+        self._preview_photo = None
+        self.render_view_status_var.set("Preparing live preview...")
+        if hasattr(self, "render_preview_label"):
+            self.render_preview_label.configure(text="Preparing live preview...", image="")
+        self._preview_thread = threading.Thread(target=self._preview_worker, daemon=True)
+        self._preview_thread.start()
+
+    def _stop_render_preview(self) -> None:
+        self._preview_stop_event.set()
+        if self._preview_thread and self._preview_thread.is_alive():
+            self._preview_thread.join(timeout=0.5)
+        self._preview_thread = None
+        self._preview_output_path = None
+        self._preview_ffmpeg_path = None
+
+    def _subprocess_kwargs(self) -> dict[str, int]:
+        if os.name != "nt":
+            return {}
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+
+    def _preview_worker(self) -> None:
+        if self._preview_output_path is None or self._preview_ffmpeg_path is None:
+            return
+
+        preview_dir = self._settings_dir() / "preview"
+        try:
+            preview_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.after(0, self._set_preview_status, "Preview folder unavailable.")
+            return
+
+        preview_png = preview_dir / "live_preview.png"
+        while not self._preview_stop_event.is_set():
+            output_path = self._preview_output_path
+            ffmpeg_path = self._preview_ffmpeg_path
+            if output_path is None or ffmpeg_path is None:
+                break
+
+            if not output_path.exists() or output_path.stat().st_size <= 0:
+                self.after(0, self._set_preview_status, "Waiting for first encoded frames...")
+                self._preview_stop_event.wait(1.0)
+                continue
+
+            cmd = [
+                str(ffmpeg_path),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(output_path),
+                "-vf",
+                "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2:color=black",
+                "-frames:v",
+                "1",
+                str(preview_png),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False, **self._subprocess_kwargs())
+            if proc.returncode == 0 and preview_png.exists() and preview_png.stat().st_size > 0:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                self.after(0, self._update_preview_image, preview_png, timestamp)
+            else:
+                stderr_text = (proc.stderr or "").strip()
+                if self._is_preview_pending_stderr(stderr_text):
+                    self.after(0, self._set_preview_status, "Preview will appear after muxing stabilizes...")
+                elif stderr_text:
+                    self.after(0, self._set_preview_status, f"Preview update pending: {stderr_text.splitlines()[-1]}")
+                else:
+                    self.after(0, self._set_preview_status, "Preview update pending...")
+
+            self._preview_stop_event.wait(1.5)
+
+    def _update_preview_image(self, image_path: Path, timestamp: str) -> None:
+        if not hasattr(self, "render_preview_label"):
+            return
+        try:
+            image = tk.PhotoImage(file=str(image_path))
+        except tk.TclError:
+            self._set_preview_status("Preview frame decode failed.")
+            return
+        self._preview_photo = image
+        self.render_preview_label.configure(image=image, text="")
+        self.render_view_status_var.set(f"Live preview updated at {timestamp}")
+
+    def _set_preview_status(self, text: str) -> None:
+        self.render_view_status_var.set(text)
+        if hasattr(self, "render_preview_label") and not self._preview_photo:
+            self.render_preview_label.configure(text=text, image="")
+
+    def _is_preview_pending_stderr(self, stderr_text: str) -> bool:
+        lowered = stderr_text.casefold()
+        return any(
+            token in lowered
+            for token in (
+                "invalid data found when processing input",
+                "moov atom not found",
+                "error reading header",
+                "could not find codec parameters",
+                "end of file",
+            )
+        )
+
+    def _capture_final_preview(self, output_path: Path, ffmpeg_path: Path) -> bool:
+        preview_dir = self._settings_dir() / "preview"
+        try:
+            preview_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return False
+        preview_png = preview_dir / "live_preview.png"
+        cmd = [
+            str(ffmpeg_path),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(output_path),
+            "-vf",
+            "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2:color=black",
+            "-frames:v",
+            "1",
+            str(preview_png),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False, **self._subprocess_kwargs())
+        if proc.returncode == 0 and preview_png.exists() and preview_png.stat().st_size > 0:
+            self._update_preview_image(preview_png, datetime.now().strftime("%H:%M:%S"))
+            return True
+        return False
+
+    def copy_log_to_clipboard(self) -> None:
+        text = self.log_text.get("1.0", tk.END).strip()
+        if not text:
+            self.status_var.set("Log is empty.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.status_var.set("Render log copied to clipboard.")
 
 
 def launch_gui() -> None:

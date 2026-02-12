@@ -5,7 +5,7 @@ from pathlib import Path
 from wfp_compiler.ffmpeg_graph import FFmpegGraph
 from wfp_compiler.ffmpeg_runtime import FFmpegBinaries
 from wfp_compiler.gui import WfpCompilerApp
-from wfp_compiler.models import QualityPreset
+from wfp_compiler.models import QualityPreset, RenderEngine
 from wfp_compiler.parser import parse_wfp_project
 from wfp_compiler import renderer
 
@@ -62,6 +62,7 @@ def test_render_uses_normalized_output_path(tmp_path: Path, monkeypatch) -> None
         output_path=tmp_path / "no_extension_output",
         quality=QualityPreset.BALANCED,
         ffmpeg_binaries=binaries,
+        engine=RenderEngine.V1,
     )
 
     expected = tmp_path / "no_extension_output.mp4"

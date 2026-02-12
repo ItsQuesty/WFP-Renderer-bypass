@@ -1,0 +1,17 @@
+{
+  "generated_at": null,
+  "manifest_count": 0,
+  "selection_policy": "top cumulative 95%, excluding ai/stabilization",
+  "required": {
+    "effects": [],
+    "transitions": [],
+    "titles": [],
+    "color": []
+  },
+  "counts": {
+    "effects": {},
+    "transitions": {},
+    "titles": {},
+    "color": {}
+  }
+}
