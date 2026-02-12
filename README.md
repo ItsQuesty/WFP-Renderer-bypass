@@ -1,4 +1,5 @@
 WFP Compiler (WFP-Renderer-bypass)
+"i am become renderer, destroyer of watermarks"
 A clean-room, external rendering engine for Wondershare Filmora 15 (.wfp) project files.
 
 WFP Compiler parses project files and reconstructs the editing timeline using FFmpeg, allowing you to export projects to MP4 without using the Filmora engine, effectively bypassing watermarks and export restrictions without cracking or modifying the original software.
